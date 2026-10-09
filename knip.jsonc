@@ -40,6 +40,10 @@
       // CLI archive and desktop sidecar stage them from this manifest.
       "ignoreDependencies": ["@effect/platform-node-shared", "@t3tools/web", "@napi-rs/keyring"],
     },
+    "apps/desktop-tauri": {
+      // Vite+ pack entries: the injected bridge script and the desktop host helper.
+      "entry": ["src/bridge.ts!", "host/main.ts!"],
+    },
     "apps/desktop": {
       // Electron loads these bundles by filename rather than importing them.
       "entry": [

@@ -207,8 +207,8 @@ impl Backend {
                 config.cwd.display()
             );
         }
-        forward_output(child.stdout.take(), log.clone());
-        forward_output(child.stderr.take(), log);
+        forward_output("backend", child.stdout.take(), log.clone());
+        forward_output("backend", child.stderr.take(), log);
 
         Ok(RunningChild {
             child,
@@ -218,7 +218,7 @@ impl Backend {
     }
 }
 
-fn open_log(path: &PathBuf) -> Option<Arc<Mutex<std::fs::File>>> {
+pub(crate) fn open_log(path: &PathBuf) -> Option<Arc<Mutex<std::fs::File>>> {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -230,14 +230,15 @@ fn open_log(path: &PathBuf) -> Option<Arc<Mutex<std::fs::File>>> {
         .map(|file| Arc::new(Mutex::new(file)))
 }
 
-fn forward_output(
+pub(crate) fn forward_output(
+    label: &'static str,
     stream: Option<impl std::io::Read + Send + 'static>,
     log: Option<Arc<Mutex<std::fs::File>>>,
 ) {
     let Some(stream) = stream else { return };
     std::thread::spawn(move || {
         for line in BufReader::new(stream).lines().map_while(Result::ok) {
-            eprintln!("[backend] {line}");
+            eprintln!("[{label}] {line}");
             if let Some(log) = &log {
                 let _ = writeln!(log.lock().unwrap(), "{line}");
             }
@@ -274,7 +275,7 @@ fn terminate(running: RunningChild) {
 /// A job object with KILL_ON_JOB_CLOSE, so the backend's process tree dies
 /// with the app even if the app crashes before `stop()` runs.
 #[cfg(windows)]
-mod job {
+pub(crate) mod job {
     use std::os::windows::io::AsRawHandle;
     use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
     use windows_sys::Win32::System::JobObjects::{

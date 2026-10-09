@@ -1,5 +1,6 @@
 mod backend;
 mod commands;
+mod host;
 mod menu;
 mod settings;
 
@@ -21,6 +22,7 @@ const MACOS_TRAFFIC_LIGHT_POSITION: (f64, f64) = (16.0, 52.0 / 2.0 - 7.0);
 
 pub struct AppState {
     pub backend: Arc<Backend>,
+    pub host: host::Host,
     pub paths: Paths,
     pub context_menus: commands::ContextMenus,
     pub zoom: menu::Zoom,
@@ -107,38 +109,52 @@ fn can_listen(host: &str, port: u16) -> bool {
     }
 }
 
-/// Dev runs the server from source, like `apps/server`'s own dev script.
-/// Packaged builds run the Node sidecar beside the executable against the
-/// `server/` resource tree that scripts/build-desktop-tauri-artifact.ts
-/// stages (on Windows both sit next to the exe). The server finds its web
-/// client, resource monitor, and runtime externals relative to bin.mjs. Both
-/// paths can be overridden by env, which is how an unpackaged release build
-/// can be pointed at a stage.
-fn resolve_backend_launch(app: &tauri::App, is_development: bool) -> (PathBuf, PathBuf, PathBuf) {
+/// The Node processes this shell runs: the backend (`apps/server`) and the
+/// desktop host helper (`apps/desktop-tauri/host`).
+struct NodeLaunch {
+    node: PathBuf,
+    server_entry: PathBuf,
+    host_entry: PathBuf,
+    cwd: PathBuf,
+}
+
+/// Dev runs both from source, like `apps/server`'s own dev script. Packaged
+/// builds run the Node sidecar beside the executable against the `server/`
+/// and `host/` resource trees that scripts/build-desktop-tauri-artifact.ts
+/// stages (on Windows all of it sits next to the exe). The server finds its
+/// web client, resource monitor, and runtime externals relative to bin.mjs.
+/// Every path can be overridden by env, which is how an unpackaged release
+/// build can be pointed at a stage.
+fn resolve_node_launch(app: &tauri::App, is_development: bool) -> NodeLaunch {
     let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..");
-    let (default_node, default_entry, cwd) = if is_development {
-        (
-            PathBuf::from("node"),
-            repo_root.join("apps/server/src/bin.ts"),
-            repo_root,
-        )
+    let defaults = if is_development {
+        NodeLaunch {
+            node: PathBuf::from("node"),
+            server_entry: repo_root.join("apps/server/src/bin.ts"),
+            host_entry: repo_root.join("apps/desktop-tauri/host/main.ts"),
+            cwd: repo_root,
+        }
     } else {
         let exe_dir = std::env::current_exe()
             .ok()
             .and_then(|exe| exe.parent().map(PathBuf::from))
             .unwrap_or_default();
         let resources = strip_verbatim_prefix(app.path().resource_dir().unwrap_or_default());
-        (
-            exe_dir.join(if cfg!(windows) { "node.exe" } else { "node" }),
-            resources.join("server/bin.mjs"),
-            home_dir(),
-        )
+        NodeLaunch {
+            node: exe_dir.join(if cfg!(windows) { "node.exe" } else { "node" }),
+            server_entry: resources.join("server/bin.mjs"),
+            host_entry: resources.join("host/main.mjs"),
+            cwd: home_dir(),
+        }
     };
-    (
-        env_non_empty("T3CODE_TAURI_NODE").map_or(default_node, PathBuf::from),
-        env_non_empty("T3CODE_TAURI_SERVER_ENTRY").map_or(default_entry, PathBuf::from),
-        cwd,
-    )
+    NodeLaunch {
+        node: env_non_empty("T3CODE_TAURI_NODE").map_or(defaults.node, PathBuf::from),
+        server_entry: env_non_empty("T3CODE_TAURI_SERVER_ENTRY")
+            .map_or(defaults.server_entry, PathBuf::from),
+        host_entry: env_non_empty("T3CODE_TAURI_HOST_ENTRY")
+            .map_or(defaults.host_entry, PathBuf::from),
+        cwd: defaults.cwd,
+    }
 }
 
 /// Tauri canonicalizes the executable path, which on Windows produces a
@@ -241,6 +257,7 @@ pub fn run() {
             commands::minimize_window,
             commands::toggle_maximize_window,
             commands::close_window,
+            commands::host_call,
         ])
         .on_menu_event(|app, event| {
             menu::handle_menu_event(app, &event);
@@ -248,15 +265,24 @@ pub fn run() {
         })
         .setup(|app| {
             let environment = Environment::resolve();
-            let (node, entry, cwd) = resolve_backend_launch(app, environment.is_development);
+            let launch = resolve_node_launch(app, environment.is_development);
             let backend = Backend::new(BackendConfig {
-                node,
-                entry,
-                cwd,
+                node: launch.node.clone(),
+                entry: launch.server_entry,
+                cwd: launch.cwd.clone(),
                 port: resolve_port(),
                 t3_home: environment.base_dir.clone(),
                 log_path: environment.state_dir.join("logs/desktop-tauri-backend.log"),
             });
+            let host = host::Host::new(
+                host::HostConfig {
+                    node: launch.node,
+                    entry: launch.host_entry,
+                    cwd: launch.cwd,
+                    log_path: environment.state_dir.join("logs/desktop-tauri-host.log"),
+                },
+                app.handle().clone(),
+            );
             let paths = Paths {
                 state_dir: environment.state_dir.clone(),
             };
@@ -276,6 +302,7 @@ pub fn run() {
 
             app.manage(AppState {
                 backend,
+                host,
                 paths,
                 context_menus: Default::default(),
                 zoom: Default::default(),
@@ -349,7 +376,9 @@ pub fn run() {
 
     app.run(|app, event| {
         if let RunEvent::Exit = event {
-            app.state::<AppState>().backend.stop();
+            let state = app.state::<AppState>();
+            state.backend.stop();
+            state.host.stop();
         }
     });
 }

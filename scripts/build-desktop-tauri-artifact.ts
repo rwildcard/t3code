@@ -13,6 +13,7 @@
  *   server/client/           resource-monitor/ and node_modules/ beside it
  *   server/resource-monitor/
  *   server/node_modules/     runtime externals, hoisted, no pnpm bookkeeping
+ *   host/main.mjs            desktop host helper (apps/desktop-tauri/host), one file
  *
  * The window loads the same client/ embedded in the executable. Everything is
  * staged under apps/desktop-tauri/stage/<platform>-<arch> and handed to
@@ -156,6 +157,7 @@ const buildDesktopTauriArtifact = Effect.fn("buildDesktopTauriArtifact")(functio
   const tauriDir = path.join(appDir, "src-tauri");
   const stageDir = path.join(appDir, "stage", targetKey);
   const serverStageDir = path.join(stageDir, "server");
+  const hostStageDir = path.join(stageDir, "host");
   const clientDir = path.join(serverStageDir, "client");
   const version = tauriPackageJson.version;
 
@@ -176,13 +178,13 @@ const buildDesktopTauriArtifact = Effect.fn("buildDesktopTauriArtifact")(functio
     "vp run --filter t3 build",
   );
 
-  yield* Effect.log("[desktop-tauri] Building the bridge script...");
-  const bridgeBuild = yield* resolveSpawnCommand("vp", ["pack"]);
+  yield* Effect.log("[desktop-tauri] Building the bridge script and the desktop host...");
+  const packBuild = yield* resolveSpawnCommand("vp", ["pack"]);
   yield* runCommand(
-    bridgeBuild.command,
-    bridgeBuild.args,
-    { cwd: appDir, shell: bridgeBuild.shell },
-    "vp pack (bridge)",
+    packBuild.command,
+    packBuild.args,
+    { cwd: appDir, shell: packBuild.shell },
+    "vp pack (bridge, host)",
   );
 
   yield* Effect.log(`[desktop-tauri] Staging ${targetKey} in ${stageDir}...`);
@@ -232,6 +234,18 @@ const buildDesktopTauriArtifact = Effect.fn("buildDesktopTauriArtifact")(functio
     verbose: input.verbose,
   });
   yield* Effect.log("[desktop-tauri] Staged server runs without the repo (bin.mjs --version).");
+
+  yield* fs.makeDirectory(hostStageDir, { recursive: true });
+  yield* fs.copyFile(path.join(appDir, "dist/host/main.mjs"), path.join(hostStageDir, "main.mjs"));
+  yield* verifyServerBundleDirectoryIsSelfContained({
+    bundleDir: hostStageDir,
+    entryRelativePath: "main.mjs",
+    node: stagedNode,
+    verbose: input.verbose,
+  });
+  yield* Effect.log(
+    "[desktop-tauri] Staged desktop host runs without the repo (host/main.mjs --version).",
+  );
   const fileCount = yield* countPayloadFiles(stageDir);
   yield* Effect.log(`[desktop-tauri] Staged ${String(fileCount)} files.`);
 
@@ -242,7 +256,10 @@ const buildDesktopTauriArtifact = Effect.fn("buildDesktopTauriArtifact")(functio
   const config = {
     build: { frontendDist: fromTauriDir(clientDir) },
     bundle: {
-      resources: { [fromTauriDir(serverStageDir)]: "server" },
+      resources: {
+        [fromTauriDir(serverStageDir)]: "server",
+        [fromTauriDir(hostStageDir)]: "host",
+      },
       externalBin: [fromTauriDir(path.join(stageDir, "node"))],
     },
   };

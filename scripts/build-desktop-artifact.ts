@@ -2128,7 +2128,7 @@ export const verifyServerBundleDirectoryIsSelfContained = Effect.fn(
       },
     ),
     {
-      label: "server sidecar self-containment check (node bin.mjs --version)",
+      label: `bundle self-containment check (node ${input.entryRelativePath} --version)`,
       verbose: input.verbose,
     },
   ).pipe(

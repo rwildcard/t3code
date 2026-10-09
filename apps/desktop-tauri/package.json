@@ -7,11 +7,17 @@
     "build:bridge": "vp pack",
     "dev": "vp pack && node scripts/dev.mjs",
     "tauri": "tauri",
+    "test": "vp test run --config ../../vite.config.ts --dir .",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
+    "@effect/platform-node": "catalog:",
+    "@effect/vitest": "catalog:",
     "@t3tools/contracts": "workspace:*",
+    "@t3tools/ssh": "workspace:*",
     "@tauri-apps/cli": "^2.9.0",
+    "@types/node": "catalog:",
+    "effect": "catalog:",
     "vite-plus": "catalog:"
   },
   "productName": "T3 Code (Alpha)"

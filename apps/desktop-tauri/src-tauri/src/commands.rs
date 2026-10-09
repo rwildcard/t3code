@@ -13,7 +13,7 @@ use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
 use tokio::sync::oneshot;
 
-use crate::{settings, AppState};
+use crate::{host, settings, AppState};
 
 type CommandResult<T> = Result<T, String>;
 
@@ -196,6 +196,16 @@ pub fn toggle_maximize_window(window: WebviewWindow) -> CommandResult<()> {
 #[tauri::command]
 pub fn close_window(window: WebviewWindow) -> CommandResult<()> {
     window.close().map_err(to_message)
+}
+
+/// Forwards a bridge method to the desktop host helper; see host.rs.
+#[tauri::command]
+pub async fn host_call(
+    state: State<'_, AppState>,
+    method: String,
+    params: Value,
+) -> Result<Value, host::HostError> {
+    state.host.call(&method, params).await
 }
 
 #[tauri::command]

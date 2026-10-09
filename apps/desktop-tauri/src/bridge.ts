@@ -64,6 +64,30 @@ function unsupported(feature: string): Promise<never> {
   return Promise.reject(new Error(`${feature} is not available in the Tauri desktop build yet.`));
 }
 
+// A failed host call rejects with the helper's `{message, tag}` (see
+// src-tauri/src/host.rs); anything else is Tauri's own string.
+function toHostError(error: unknown): Error {
+  if (error instanceof Error) return error;
+  if (
+    typeof error === "object" &&
+    error !== null &&
+    "message" in error &&
+    typeof error.message === "string"
+  ) {
+    const hostError = new Error(error.message);
+    if ("tag" in error && typeof error.tag === "string") hostError.name = error.tag;
+    return hostError;
+  }
+  return new Error(String(error));
+}
+
+/** Runs a method in the Node desktop host helper (`host/main.ts`). */
+function hostCall<T>(method: string, params: unknown = null): Promise<T> {
+  return invoke<T>("host_call", { method, params }).catch((error: unknown) => {
+    throw toHostError(error);
+  });
+}
+
 // The bootstrap token rotates every 12h window and a token is accepted for one
 // to two windows. A long-lived page would otherwise hold an expired one, so
 // keep the synchronously-read copy fresh.
@@ -265,10 +289,11 @@ const bridge = {
   onWindowFullscreenStateChange: (listener) => subscribe("fullscreen", listener),
   ...(init.platform === "win32" ? { windowControls } : {}),
 
+  discoverSshHosts: () => hostCall("discoverSshHosts"),
+  resolveSshHost: (alias) => hostCall("resolveSshHost", alias),
+
   // Not ported yet. Reads return an inert state so settings pages render;
   // writes reject so the UI surfaces the gap instead of pretending.
-  discoverSshHosts: async () => [],
-  resolveSshHost: () => unsupported("SSH"),
   ensureSshEnvironment: () => unsupported("SSH"),
   disconnectSshEnvironment: () => unsupported("SSH"),
   fetchSshEnvironmentDescriptor: () => unsupported("SSH"),
