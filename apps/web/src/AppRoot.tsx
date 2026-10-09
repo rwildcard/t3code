@@ -3,6 +3,7 @@ import { RouterProvider } from "@tanstack/react-router";
 import { BrowserProfileReporter } from "./browser/BrowserProfileReporter";
 import { ElectronBrowserHost } from "./browser/ElectronBrowserHost";
 import { QuitHoldOverlay } from "./components/QuitHoldOverlay";
+import { WindowCaptionControls } from "./components/desktop/WindowCaptionControls";
 import { AppAtomRegistryProvider } from "./rpc/atomRegistry";
 import type { AppRouter } from "./router";
 
@@ -18,6 +19,8 @@ export function AppRoot({ router }: { readonly router: AppRouter }) {
       <ElectronBrowserHost />
       <BrowserProfileReporter />
       <QuitHoldOverlay />
+      {/* Window chrome, outside the router so every route and gate keeps it. */}
+      <WindowCaptionControls />
     </AppAtomRegistryProvider>
   );
 }

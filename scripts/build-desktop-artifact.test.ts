@@ -17,6 +17,7 @@ import { ChildProcess, ChildProcessSpawner } from "effect/process";
 import {
   BundleNotSelfContainedError,
   BuildCommandFailedError,
+  verifyServerBundleDirectoryIsSelfContained,
   parseWslRuntimeArchiveMembers,
   DesktopDmgBackgroundSourceMissingError,
   createStageWorkspaceConfig,
@@ -938,6 +939,41 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
           ),
           "cached monitor",
         );
+      }),
+    ),
+  );
+
+  it.effect("probes a staged server tree from an isolated copy", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const bundleDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-selfcheck-test-" });
+        const dependencyDir = path.join(bundleDir, "node_modules/probe-dep");
+        yield* fs.makeDirectory(dependencyDir, { recursive: true });
+        yield* fs.writeFileString(
+          path.join(dependencyDir, "index.js"),
+          "module.exports = '1.2.3';",
+        );
+        yield* fs.writeFileString(
+          path.join(bundleDir, "bin.mjs"),
+          'import { createRequire } from "node:module";\nconsole.log(createRequire(import.meta.url)("probe-dep"));\n',
+        );
+        const probe = {
+          bundleDir,
+          entryRelativePath: "bin.mjs",
+          node: process.execPath,
+          verbose: false,
+        };
+
+        yield* verifyServerBundleDirectoryIsSelfContained(probe);
+
+        // The dependency the entry loads is gone from the staged tree; the
+        // probe must not find it anywhere else either.
+        yield* fs.remove(path.join(bundleDir, "node_modules"), { recursive: true });
+        const error = yield* verifyServerBundleDirectoryIsSelfContained(probe).pipe(Effect.flip);
+        assert.instanceOf(error, BundleNotSelfContainedError);
+        assert.include(error.output, "probe-dep");
       }),
     ),
   );

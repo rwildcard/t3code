@@ -1,0 +1,18 @@
+{
+  "name": "@t3tools/desktop-tauri",
+  "version": "0.0.45",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build:bridge": "vp pack",
+    "dev": "vp pack && node scripts/dev.mjs",
+    "tauri": "tauri",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@t3tools/contracts": "workspace:*",
+    "@tauri-apps/cli": "^2.9.0",
+    "vite-plus": "catalog:"
+  },
+  "productName": "T3 Code (Alpha)"
+}

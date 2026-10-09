@@ -160,6 +160,21 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
   );
 }
 
+/* A shell with no native caption buttons (Tauri on Windows) has no
+   titlebar-area-* values; WindowCaptionControls.tsx draws the three buttons
+   at Chromium's Windows overlay geometry instead: 40px tall, 46px each. */
+.wco.page-window-controls {
+  /* tao keeps the resize frame outside the client area, so the page needs no
+     strip for it (unlike Chromium's frameless window, .electron-windows). */
+  --desktop-window-right-resize-inset: 0px;
+  --window-caption-button-width: 46px;
+  --workspace-topbar-height: 40px;
+  --workspace-controls-top: 0px;
+  --workspace-controls-left: 0.75rem;
+  --workspace-controls-right: calc(3 * var(--window-caption-button-width) + 0.75rem);
+  --workspace-native-controls-inset: calc(3 * var(--window-caption-button-width) + 0.75rem);
+}
+
 /* The font tokens are declared outside the inline theme so utilities reference
    the variables and Settings -> Appearance can override them at runtime. The
    default stacks are mirrored in `appearanceFonts.ts`. */
@@ -241,6 +256,8 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
   --color-input: var(--contrast-input);
   --color-border: var(--contrast-border);
   --color-destructive: var(--destructive);
+  /* Windows 11's close-button hover; fixed by the OS, not the theme. */
+  --color-window-caption-close: #c42b1c;
   --color-accent-foreground: var(--contrast-accent-foreground);
   --color-accent: var(--accent);
   --color-muted-foreground: var(--contrast-muted-foreground);

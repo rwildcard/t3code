@@ -2057,16 +2057,113 @@ export const copyDirectoryPreservingSymlinks = Effect.fn("copyDirectoryPreservin
   },
 );
 
+/**
+ * Runs the staged server's `--version` from an isolated copy of `bundleDir`,
+ * so a dependency missing from the staged tree fails the build instead of a
+ * user's first launch. `node` is the runtime the package ships, when it ships
+ * one; the Electron build probes with the build host's Node.
+ */
+export const verifyServerBundleDirectoryIsSelfContained = Effect.fn(
+  "verifyServerBundleDirectoryIsSelfContained",
+)(function* (input: {
+  readonly bundleDir: string;
+  readonly entryRelativePath: string;
+  readonly node: string;
+  readonly verbose: boolean;
+}) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+
+  const probeRoot = yield* fs.makeTempDirectoryScoped({
+    prefix: "t3code-bundle-selfcheck-",
+  });
+  const probeApp = path.join(probeRoot, "app");
+  // Keep the existing symlink isolation guard even though the sidecar stage
+  // is hoisted and should be physical. A future package-manager layout change
+  // must not let the probe resolve through the build tree.
+  yield* copyDirectoryPreservingSymlinks(input.bundleDir, probeApp);
+
+  // Guard the guard: if anything above the probe provides a node_modules, a
+  // missing dependency would resolve there and the check would pass while the
+  // packaged tree is broken.
+  for (const candidate of ancestorNodeModulesPaths(probeApp, path.sep)) {
+    if (yield* fs.exists(candidate).pipe(Effect.orElseSucceed(() => false))) {
+      return yield* new BundleNotSelfContainedError({
+        exitCode: -1,
+        output: `Refusing to report success: ${candidate} is visible from the probe directory, so bare imports could resolve outside the packaged tree. Remove or rename it, or point TMPDIR somewhere without one.`,
+      });
+    }
+  }
+
+  const entryPoint = path.join(probeApp, input.entryRelativePath);
+  if (!(yield* fs.exists(entryPoint).pipe(Effect.orElseSucceed(() => false)))) {
+    return yield* new BundleNotSelfContainedError({
+      exitCode: -1,
+      output: `Expected the server entry at ${entryPoint}.`,
+    });
+  }
+
+  // --version exercises the eagerly loaded module graph, which is where a
+  // missing dependency shows up, without starting a server or touching disk
+  // state. It does not cover lazily imported externals: node-pty is checked
+  // by the WSL preflight probe at runtime, while ffi-rs, @ff-labs/fff-node
+  // and the bun adapters are covered by the shared runtime-external closure
+  // and emitted-bundle checks.
+  yield* runCommand(
+    ChildProcess.make(
+      input.node,
+      // --no-global-search-paths because clearing NODE_PATH is not enough:
+      // CommonJS resolution still falls back to $HOME/.node_modules,
+      // $HOME/.node_libraries and the install prefix, so a globally installed
+      // copy of a missing dependency would quietly satisfy this check.
+      ["--no-global-search-paths", entryPoint, "--version"],
+      {
+        cwd: probeApp,
+        stdout: "pipe",
+        stderr: "pipe",
+        // NODE_PATH would let a createRequire call inside the bundle resolve
+        // a missing external from outside the packaged tree, which is the
+        // whole thing this is trying to rule out.
+        env: { ...process.env, NODE_PATH: "" },
+      },
+    ),
+    {
+      label: "server sidecar self-containment check (node bin.mjs --version)",
+      verbose: input.verbose,
+    },
+  ).pipe(
+    // Printing a version should be immediate. A regression that blocks (on
+    // stdin, a port, a lock) would otherwise hang release CI until the job
+    // times out with nothing useful in the log.
+    Effect.timeout(BUNDLE_SELF_CHECK_TIMEOUT),
+    Effect.catchTags({
+      TimeoutError: () =>
+        Effect.fail(
+          new BundleNotSelfContainedError({
+            exitCode: -1,
+            output: `The packaged bundle did not print its version within ${Duration.toSeconds(BUNDLE_SELF_CHECK_TIMEOUT)}s; it is hanging rather than failing to resolve.`,
+          }),
+        ),
+      BuildCommandFailedError: (error) =>
+        Effect.fail(
+          new BundleNotSelfContainedError({
+            exitCode: error.exitCode,
+            output: `${error.stderrTail ?? ""}${error.stdoutTail ?? ""}`.trim(),
+          }),
+        ),
+    }),
+  );
+});
+
 const verifyPackagedBundleIsSelfContained = Effect.fn("verifyPackagedBundleIsSelfContained")(
   function* (input: { readonly asarPath: string; readonly verbose: boolean }) {
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
 
-    const probeRoot = yield* fs.makeTempDirectoryScoped({
-      prefix: "t3code-bundle-selfcheck-",
-    });
-    const extractedApp = path.join(probeRoot, "extracted");
-    const probeApp = path.join(probeRoot, "app");
+    const extractedApp = path.join(
+      yield* fs.makeTempDirectoryScoped({ prefix: "t3code-bundle-extract-" }),
+      "extracted",
+    );
     yield* Effect.try({
       try: () => extractAll(input.asarPath, extractedApp),
       catch: (cause) =>
@@ -2075,81 +2172,12 @@ const verifyPackagedBundleIsSelfContained = Effect.fn("verifyPackagedBundleIsSel
           output: `Could not extract ${input.asarPath} for the bundle self-containment check: ${String(cause)}`,
         }),
     });
-    // Keep the existing symlink isolation guard even though the sidecar stage
-    // is hoisted and should be physical. A future package-manager layout change
-    // must not let the probe resolve through the build tree.
-    yield* copyDirectoryPreservingSymlinks(extractedApp, probeApp);
-
-    // Guard the guard: if anything above the probe provides a node_modules, a
-    // missing dependency would resolve there and the check would pass while the
-    // packaged tree is broken.
-    for (const candidate of ancestorNodeModulesPaths(probeApp, path.sep)) {
-      if (yield* fs.exists(candidate).pipe(Effect.orElseSucceed(() => false))) {
-        return yield* new BundleNotSelfContainedError({
-          exitCode: -1,
-          output: `Refusing to report success: ${candidate} is visible from the probe directory, so bare imports could resolve outside the packaged tree. Remove or rename it, or point TMPDIR somewhere without one.`,
-        });
-      }
-    }
-
-    const entryPoint = path.join(probeApp, "apps/server/dist/bin.mjs");
-    if (!(yield* fs.exists(entryPoint).pipe(Effect.orElseSucceed(() => false)))) {
-      return yield* new BundleNotSelfContainedError({
-        exitCode: -1,
-        output: `Expected the server entry at ${entryPoint}.`,
-      });
-    }
-
-    // --version exercises the eagerly loaded module graph, which is where a
-    // missing dependency shows up, without starting a server or touching disk
-    // state. It does not cover lazily imported externals: node-pty is checked
-    // by the WSL preflight probe at runtime, while ffi-rs, @ff-labs/fff-node
-    // and the bun adapters are covered by the shared runtime-external closure
-    // and emitted-bundle checks.
-    yield* runCommand(
-      ChildProcess.make(
-        process.execPath,
-        // --no-global-search-paths because clearing NODE_PATH is not enough:
-        // CommonJS resolution still falls back to $HOME/.node_modules,
-        // $HOME/.node_libraries and the install prefix, so a globally installed
-        // copy of a missing dependency would quietly satisfy this check.
-        ["--no-global-search-paths", entryPoint, "--version"],
-        {
-          cwd: probeApp,
-          stdout: "pipe",
-          stderr: "pipe",
-          // NODE_PATH would let a createRequire call inside the bundle resolve
-          // a missing external from outside the packaged tree, which is the
-          // whole thing this is trying to rule out.
-          env: { ...process.env, NODE_PATH: "" },
-        },
-      ),
-      {
-        label: "server sidecar self-containment check (node bin.mjs --version)",
-        verbose: input.verbose,
-      },
-    ).pipe(
-      // Printing a version should be immediate. A regression that blocks (on
-      // stdin, a port, a lock) would otherwise hang release CI until the job
-      // times out with nothing useful in the log.
-      Effect.timeout(BUNDLE_SELF_CHECK_TIMEOUT),
-      Effect.catchTags({
-        TimeoutError: () =>
-          Effect.fail(
-            new BundleNotSelfContainedError({
-              exitCode: -1,
-              output: `The packaged bundle did not print its version within ${Duration.toSeconds(BUNDLE_SELF_CHECK_TIMEOUT)}s; it is hanging rather than failing to resolve.`,
-            }),
-          ),
-        BuildCommandFailedError: (error) =>
-          Effect.fail(
-            new BundleNotSelfContainedError({
-              exitCode: error.exitCode,
-              output: `${error.stderrTail ?? ""}${error.stdoutTail ?? ""}`.trim(),
-            }),
-          ),
-      }),
-    );
+    yield* verifyServerBundleDirectoryIsSelfContained({
+      bundleDir: extractedApp,
+      entryRelativePath: "apps/server/dist/bin.mjs",
+      node: process.execPath,
+      verbose: input.verbose,
+    });
   },
 );
 
@@ -2509,7 +2537,7 @@ function stageWindowsIcons(stageResourcesDir: string, sourceIco: string) {
   });
 }
 
-function validateBundledClientAssets(clientDir: string) {
+export function validateBundledClientAssets(clientDir: string) {
   return Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
@@ -3042,7 +3070,9 @@ function collectUnpackedAsarFiles(
   return output;
 }
 
-const countPayloadFiles = Effect.fn("desktopArtifact.countPayloadFiles")(function* (root: string) {
+export const countPayloadFiles = Effect.fn("desktopArtifact.countPayloadFiles")(function* (
+  root: string,
+) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const pendingDirectories = [root];

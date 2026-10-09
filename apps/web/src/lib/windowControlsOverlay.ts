@@ -1,6 +1,7 @@
 import { isWindowsPlatform } from "./utils";
 
 const WCO_CLASS_NAME = "wco";
+const PAGE_WINDOW_CONTROLS_CLASS_NAME = "page-window-controls";
 const ELECTRON_CLASS_NAME = "electron";
 const ELECTRON_WINDOWS_CLASS_NAME = "electron-windows";
 
@@ -22,9 +23,23 @@ function getWindowControlsOverlay(): WindowControlsOverlayLike | null {
   return (navigator as NavigatorWithWindowControlsOverlay).windowControlsOverlay ?? null;
 }
 
+/**
+ * `.wco` lays the title bar out around the window controls. Chromium's
+ * window-controls overlay reports their geometry through `titlebar-area-*`;
+ * a shell that draws no native controls (`desktopBridge.windowControls`)
+ * gets `.page-window-controls` too, where the geometry is the web-drawn
+ * `WindowCaptionControls`' own (index.css).
+ */
 export function syncDocumentWindowControlsOverlayClass(): () => void {
   if (typeof document === "undefined") {
     return () => {};
+  }
+
+  if (window.desktopBridge?.windowControls !== undefined) {
+    document.documentElement.classList.add(WCO_CLASS_NAME, PAGE_WINDOW_CONTROLS_CLASS_NAME);
+    return () => {
+      document.documentElement.classList.remove(WCO_CLASS_NAME, PAGE_WINDOW_CONTROLS_CLASS_NAME);
+    };
   }
 
   const overlay = getWindowControlsOverlay();

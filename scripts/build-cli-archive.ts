@@ -43,10 +43,10 @@ import {
 import { selectCliRuntimeExternalDependencies } from "./lib/cli-external-packages.ts";
 import { resolveCatalogDependencies } from "./lib/resolve-catalog.ts";
 
-const BuildPlatform = Schema.Literals(["mac", "linux", "win"]);
-const BuildArch = Schema.Literals(["arm64", "x64"]);
-type BuildPlatform = typeof BuildPlatform.Type;
-type BuildArch = typeof BuildArch.Type;
+export const BuildPlatform = Schema.Literals(["mac", "linux", "win"]);
+export const BuildArch = Schema.Literals(["arm64", "x64"]);
+export type BuildPlatform = typeof BuildPlatform.Type;
+export type BuildArch = typeof BuildArch.Type;
 
 const WorkspaceConfig = Schema.Struct({
   catalog: Schema.optional(Schema.Record(Schema.String, Schema.String)),
@@ -147,7 +147,7 @@ const requireInput = Effect.fn("requireInput")(function* (inputPath: string, hin
  * hoisted, symlink-free layout. The tree is archived and unpacked on machines
  * without pnpm, so the store layout cannot be relied on to survive the trip.
  */
-const stageRuntimeExternals = Effect.fn("stageRuntimeExternals")(function* (input: {
+export const stageRuntimeExternals = Effect.fn("stageRuntimeExternals")(function* (input: {
   readonly repoRoot: string;
   readonly stageDir: string;
   readonly platform: BuildPlatform;
@@ -270,7 +270,10 @@ const removeNestedBinDirectories = (
   });
 
 /** Copies the web client without its sourcemaps, which nothing serves. */
-const stageWebClient = Effect.fn("stageWebClient")(function* (source: string, target: string) {
+export const stageWebClient = Effect.fn("stageWebClient")(function* (
+  source: string,
+  target: string,
+) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   yield* fs.copy(source, target);
