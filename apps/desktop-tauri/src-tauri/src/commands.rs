@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -310,14 +311,24 @@ async fn apply_exposure(
     Ok(())
 }
 
-/// Forwards a bridge method to the desktop host helper; see host.rs.
+/// Forwards a bridge method to the desktop host helper; see host.rs. The
+/// bridge passes a deadline for the SSH calls, which outlast the default.
 #[tauri::command]
 pub async fn host_call(
     state: State<'_, AppState>,
     method: String,
     params: Value,
+    timeout_ms: Option<u64>,
 ) -> Result<Value, host::HostError> {
-    state.host.call(&method, params).await
+    match timeout_ms {
+        Some(timeout_ms) => {
+            state
+                .host
+                .call_with_timeout(&method, params, Duration::from_millis(timeout_ms))
+                .await
+        }
+        None => state.host.call(&method, params).await,
+    }
 }
 
 #[tauri::command]

@@ -13,11 +13,15 @@ import * as NodeProcess from "node:process";
 import * as NodeReadline from "node:readline";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as NetService from "@t3tools/shared/Net";
+import * as SshTunnel from "@t3tools/ssh/tunnel";
+import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as ManagedRuntime from "effect/ManagedRuntime";
 import * as Schema from "effect/Schema";
 import * as FetchHttpClient from "effect/http/FetchHttpClient";
 
+import serverPackageJson from "../../server/package.json" with { type: "json" };
 import packageJson from "../package.json" with { type: "json" };
 
 import { makeMethods } from "./methods.ts";
@@ -40,11 +44,44 @@ function writeMessage(message: HostReply | HostEvent): void {
   NodeProcess.stdout.write(`${encodeLine(message)}\n`);
 }
 
-// The HTTP client probes the Tailscale HTTPS endpoint (see exposure.ts).
-// Node's own fetch rather than NodeHttpClient.layerUndici, which pulls undici
-// in as a second bundle chunk; the release ships the helper as one file.
-const runtime = ManagedRuntime.make(Layer.mergeAll(NodeServices.layer, FetchHttpClient.layer));
-const methods = await runtime.runPromise(makeMethods);
+function envNonEmpty(name: string): string | undefined {
+  return NodeProcess.env[name]?.trim() || undefined;
+}
+
+// What the remote runs, decided as in the Electron shell (main.ts
+// resolveDesktopSshCliRunner): the self-contained release archive of the
+// app's own version, or in development a source checkout on the remote when
+// T3CODE_DEV_REMOTE_T3_SERVER_ENTRY_PATH names one. Rust passes the version;
+// dev mode is keyed off VITE_DEV_SERVER_URL like the rest of the shell.
+function resolveCliRunner(): SshTunnel.RemoteT3RunnerOptions {
+  const devRemoteEntryPath = envNonEmpty("T3CODE_DEV_REMOTE_T3_SERVER_ENTRY_PATH");
+  if (envNonEmpty("VITE_DEV_SERVER_URL") !== undefined && devRemoteEntryPath !== undefined) {
+    return { nodeScriptPath: devRemoteEntryPath, nodeEngineRange: serverPackageJson.engines.node };
+  }
+  return { archiveVersion: envNonEmpty("T3CODE_TAURI_APP_VERSION") ?? packageJson.version };
+}
+
+// The HTTP client probes the Tailscale HTTPS endpoint (see exposure.ts) and
+// the SSH tunnels' loopback ends. Node's own fetch rather than
+// NodeHttpClient.layerUndici, which pulls undici in as a second bundle chunk;
+// the release ships the helper as one file.
+//
+// The SSH manager lives in the runtime's scope: when the shell closes stdin,
+// `dispose` runs its finalizers, which end the tunnels and stop the managed
+// remote servers, as the Electron shell's layer teardown does on quit.
+const runtime = ManagedRuntime.make(
+  Layer.mergeAll(
+    NodeServices.layer,
+    FetchHttpClient.layer,
+    NetService.layer,
+    SshTunnel.SshEnvironmentManager.layer({ resolveCliRunner: Effect.succeed(resolveCliRunner()) }),
+  ),
+);
+const methods = await runtime.runPromise(
+  makeMethods({
+    emitPasswordPrompt: (request) => writeMessage({ event: "sshPasswordPrompt", payload: request }),
+  }),
+);
 
 const input = NodeReadline.createInterface({ input: NodeProcess.stdin, crlfDelay: Infinity });
 input.on("line", (line) => {

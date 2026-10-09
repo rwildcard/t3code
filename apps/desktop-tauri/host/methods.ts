@@ -1,20 +1,14 @@
 import { resolveSshTarget } from "@t3tools/ssh/command";
 import { discoverSshHosts } from "@t3tools/ssh/config";
+import type * as SshTunnel from "@t3tools/ssh/tunnel";
 import * as Effect from "effect/Effect";
-import type * as FileSystem from "effect/FileSystem";
-import type * as Path from "effect/Path";
-import type * as HttpClient from "effect/http/HttpClient";
-import type * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import * as Schema from "effect/Schema";
 
 import { makeExposureMethods } from "./exposure.ts";
 import type { HostMethods } from "./protocol.ts";
+import { makeSshMethods, type SshMethodServices, type SshMethodsOptions } from "./ssh.ts";
 
-export type HostMethodServices =
-  | ChildProcessSpawner.ChildProcessSpawner
-  | FileSystem.FileSystem
-  | HttpClient.HttpClient
-  | Path.Path;
+export type HostMethodServices = SshMethodServices;
 
 const decodeAlias = Schema.decodeUnknownEffect(Schema.String);
 
@@ -24,13 +18,22 @@ const decodeAlias = Schema.decodeUnknownEffect(Schema.String);
  * the Rust commands that call them); the Electron shell runs the same
  * functions behind its IPC (apps/desktop/src/ssh, DesktopServerExposure.ts).
  */
-export const makeMethods: Effect.Effect<HostMethods<HostMethodServices>> = Effect.gen(function* () {
-  const exposure = yield* makeExposureMethods;
-  return {
-    ping: () => Effect.succeed("pong"),
-    discoverSshHosts: () => discoverSshHosts({}),
-    // `ssh -G` evaluates the local config for the alias and exits; it never connects.
-    resolveSshHost: (params) => decodeAlias(params).pipe(Effect.flatMap(resolveSshTarget)),
-    ...exposure,
-  };
-});
+export const makeMethods = (
+  options: SshMethodsOptions,
+): Effect.Effect<
+  HostMethods<HostMethodServices>,
+  never,
+  SshTunnel.SshEnvironmentManager | SshMethodServices
+> =>
+  Effect.gen(function* () {
+    const exposure = yield* makeExposureMethods;
+    const ssh = yield* makeSshMethods(options);
+    return {
+      ping: () => Effect.succeed("pong"),
+      discoverSshHosts: () => discoverSshHosts({}),
+      // `ssh -G` evaluates the local config for the alias and exits; it never connects.
+      resolveSshHost: (params) => decodeAlias(params).pipe(Effect.flatMap(resolveSshTarget)),
+      ...ssh,
+      ...exposure,
+    };
+  });

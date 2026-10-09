@@ -287,12 +287,14 @@ pub fn run() {
                 },
                 settings::read_server_exposure(&paths),
             );
+            let version = app.package_info().version.to_string();
             let host = host::Host::new(
                 host::HostConfig {
                     node: launch.node,
                     entry: launch.host_entry,
                     cwd: launch.cwd,
                     log_path: environment.state_dir.join("logs/desktop-tauri-host.log"),
+                    app_version: version.clone(),
                 },
                 app.handle().clone(),
             );
@@ -301,7 +303,6 @@ pub fn run() {
                 backend.start();
             }
 
-            let version = app.package_info().version.to_string();
             let script =
                 initialization_script(&environment, &backend, &version, local_environment_enabled);
             let title = if environment.is_development {
@@ -338,6 +339,20 @@ pub fn run() {
                             // maximized window learns the state from here.
                             let maximized = window.is_maximized().unwrap_or(false);
                             emit_to_webview(&window, "maximized", maximized.into());
+                            // A reload drops the page that showed any SSH
+                            // password prompt; fail those so the connect
+                            // attempt ends instead of waiting out its
+                            // timeout. Only a running helper can hold one.
+                            let app = window.app_handle().clone();
+                            if app.state::<AppState>().host.is_running() {
+                                tauri::async_runtime::spawn(async move {
+                                    let state = app.state::<AppState>();
+                                    let _ = state
+                                        .host
+                                        .call("abandonSshPasswordPrompts", serde_json::Value::Null)
+                                        .await;
+                                });
+                            }
                         }
                     });
             // Windows: no native frame, like Electron's titleBarStyle "hidden".

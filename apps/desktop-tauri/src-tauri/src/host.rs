@@ -26,15 +26,28 @@ use crate::backend::{forward_output, open_log};
 
 /// Above the longest thing a method does on its own: a cold start of the
 /// helper in dev, `tailscale serve` (10s in packages/tailscale), the
-/// MagicDNS HTTPS probe (2.5s), and `ssh -G`. A reply that arrives after
-/// the deadline finds no waiter and is dropped.
-const CALL_TIMEOUT: Duration = Duration::from_secs(30);
+/// MagicDNS HTTPS probe (2.5s), and `ssh -G`. SSH connects run far longer
+/// and pass their own bound. A reply that arrives after the deadline finds
+/// no waiter and is dropped.
+const DEFAULT_CALL_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How long `stop` lets the helper run its shutdown (ending SSH tunnels and
+/// stopping the remote servers it launched, one `ssh` command each) after
+/// stdin closes. Electron gives its backends the same at quit.
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
+
+/// The helper event carrying an in-app SSH password prompt; the window is
+/// brought forward for it, as the Electron shell restores and focuses its
+/// BrowserWindow.
+const SSH_PASSWORD_PROMPT_EVENT: &str = "sshPasswordPrompt";
 
 pub struct HostConfig {
     pub node: PathBuf,
     pub entry: PathBuf,
     pub cwd: PathBuf,
     pub log_path: PathBuf,
+    /// The release whose CLI archive a remote SSH host installs and runs.
+    pub app_version: String,
 }
 
 /// What a failed call resolves to in the webview: the Tauri invoke rejects
@@ -128,6 +141,26 @@ impl Host {
     }
 
     pub async fn call(&self, method: &str, params: Value) -> Result<Value, HostError> {
+        self.call_with_timeout(method, params, DEFAULT_CALL_TIMEOUT)
+            .await
+    }
+
+    /// True while a helper is alive, so callers can skip a request that
+    /// would only start one to find nothing to do.
+    pub fn is_running(&self) -> bool {
+        let mut running = self.shared.running.lock().unwrap();
+        matches!(
+            running.as_mut().map(|running| running.child.try_wait()),
+            Some(Ok(None))
+        )
+    }
+
+    pub async fn call_with_timeout(
+        &self,
+        method: &str,
+        params: Value,
+        timeout: Duration,
+    ) -> Result<Value, HostError> {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let (sender, receiver) = oneshot::channel();
         let request = serde_json::json!({ "id": id, "method": method, "params": params });
@@ -157,7 +190,7 @@ impl Host {
                 )));
             }
         }
-        match tokio::time::timeout(CALL_TIMEOUT, receiver).await {
+        match tokio::time::timeout(timeout, receiver).await {
             Ok(reply) => reply.unwrap_or_else(|_| {
                 Err(HostError::new("The desktop host exited before replying."))
             }),
@@ -166,7 +199,7 @@ impl Host {
                 Err(HostError::tagged(
                     format!(
                         "The desktop host did not answer {method} within {}s.",
-                        CALL_TIMEOUT.as_secs()
+                        timeout.as_secs()
                     ),
                     "HostTimeoutError",
                 ))
@@ -174,11 +207,28 @@ impl Host {
         }
     }
 
+    /// Closes stdin, which the helper takes as its shutdown signal, and
+    /// gives it the grace period before killing what is left.
     pub fn stop(&self) {
-        if let Some(mut running) = self.shared.running.lock().unwrap().take() {
-            let _ = running.child.kill();
-            let _ = running.child.wait();
+        let Some(running) = self.shared.running.lock().unwrap().take() else {
+            return;
+        };
+        let Running {
+            mut child,
+            stdin,
+            #[cfg(windows)]
+            _job,
+        } = running;
+        drop(stdin);
+        let deadline = std::time::Instant::now() + SHUTDOWN_GRACE;
+        while std::time::Instant::now() < deadline {
+            if let Ok(Some(_)) = child.try_wait() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(50));
         }
+        let _ = child.kill();
+        let _ = child.wait();
     }
 
     fn spawn(&self) -> std::io::Result<Running> {
@@ -186,6 +236,7 @@ impl Host {
         let mut command = Command::new(&config.node);
         command
             .arg(&config.entry)
+            .env("T3CODE_TAURI_APP_VERSION", &config.app_version)
             .current_dir(&config.cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -245,6 +296,10 @@ impl Shared {
                 }
                 Some(Message::Event { name, payload }) => {
                     if let Some(window) = self.app.get_webview_window("main") {
+                        if name == SSH_PASSWORD_PROMPT_EVENT {
+                            let _ = window.unminimize();
+                            let _ = window.set_focus();
+                        }
                         crate::emit_to_webview(&window, &format!("host:{name}"), payload);
                     }
                 }

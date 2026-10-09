@@ -66,7 +66,7 @@ network-accessible mode binds 0.0.0.0 even while no LAN address is up
 (Electron falls back to loopback until the next relaunch).
 
 Not ported yet. These return inert state or reject, and the UI hides
-optional members: preview browser, Snap Shot capture, SSH connections, WSL
+optional members: preview browser, Snap Shot capture, WSL
 backend, auto-updates, the `t3` CLI shim
 and app activation, Clerk passkeys, connection catalog (keyring), system
 permission panes, dropped-file paths (`getPathForFile`), the hold/double-press
@@ -74,9 +74,24 @@ quit confirmation (`onQuitShortcut`, Quit is immediate), the Paste as Text
 menu item (`pasteAsText`; the keyboard chord is the webview's own), and the
 macOS traffic-light re-centering on zoom.
 
-SSH: host discovery (`~/.ssh/config` and `known_hosts`) and alias resolution
-(`ssh -G`) run in the desktop host helper; connecting, password prompts, and
-the remote API bridge are not ported yet.
+SSH runs in the desktop host helper (`host/ssh.ts`): host discovery and
+alias resolution as before, plus `SshEnvironmentManager` from `packages/ssh`,
+which owns the `ssh` tunnel processes for the helper's lifetime. The remote
+runs the CLI release archive of the app's version (Rust passes it as
+`T3CODE_TAURI_APP_VERSION`), or in dev a checkout named by
+`T3CODE_DEV_REMOTE_T3_SERVER_ENTRY_PATH`, the same rule as the Electron
+shell. In-app password prompts are `sshPasswordPrompt` helper events: Rust
+brings the window forward and forwards them, and the page answers through
+`resolveSshPasswordPrompt`; a page reload abandons pending prompts so the
+connect attempt fails instead of waiting out the three-minute timeout. The
+remote API methods (descriptor, bearer bootstrap, session state, WebSocket
+ticket) proxy to the loopback tunnel from the helper, as Electron's main
+process does, so the page never fetches the tunnel origin directly. SSH host
+calls pass their own deadline to `host_call`; everything else keeps the 30s
+default. On exit the shell closes the helper's stdin and waits up to 5s so
+the helper can end its tunnels and stop the remote servers it launched,
+which Electron's layer teardown does on quit; after that the job object
+ends whatever is left.
 
 ## Packaging
 

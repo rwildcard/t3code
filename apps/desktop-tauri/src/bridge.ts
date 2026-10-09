@@ -82,11 +82,42 @@ function toHostError(error: unknown): Error {
   return new Error(String(error));
 }
 
-/** Runs a method in the Node desktop host helper (`host/main.ts`). */
-function hostCall<T>(method: string, params: unknown = null): Promise<T> {
-  return invoke<T>("host_call", { method, params }).catch((error: unknown) => {
-    throw toHostError(error);
-  });
+/**
+ * Runs a method in the Node desktop host helper (`host/main.ts`). Rust bounds
+ * each call (30s unless `timeoutMs` says otherwise, see src-tauri/src/host.rs).
+ */
+function hostCall<T>(method: string, params: unknown = null, timeoutMs?: number): Promise<T> {
+  return invoke<T>("host_call", { method, params, timeoutMs: timeoutMs ?? null }).catch(
+    (error: unknown) => {
+      throw toHostError(error);
+    },
+  );
+}
+
+// Electron's IPC has no deadline for these. packages/ssh bounds the work
+// itself: a cold archive launch may download and install for up to 15
+// minutes, pairing again as long, each of up to two password prompts waits
+// three minutes, and a disconnect runs one stop command plus prompts.
+const SSH_ENSURE_TIMEOUT_MS = 40 * 60 * 1000;
+const SSH_DISCONNECT_TIMEOUT_MS = 10 * 60 * 1000;
+
+// Mirrors unwrapEnsureSshEnvironmentResult in the Electron preload: a
+// cancelled or expired password prompt comes back as a result, not a
+// failure, and surfaces to the page as an Error carrying its message.
+function unwrapEnsureSshEnvironmentResult(result: unknown) {
+  if (
+    typeof result === "object" &&
+    result !== null &&
+    "type" in result &&
+    result.type === "ssh-password-prompt-cancelled"
+  ) {
+    const message =
+      "message" in result && typeof result.message === "string"
+        ? result.message
+        : "SSH authentication cancelled.";
+    throw new Error(message);
+  }
+  return result as Awaited<ReturnType<DesktopBridge["ensureSshEnvironment"]>>;
 }
 
 // The bootstrap token rotates every 12h window and a token is accepted for one
@@ -318,19 +349,27 @@ const bridge = {
   onWindowFullscreenStateChange: (listener) => subscribe("fullscreen", listener),
   ...(init.platform === "win32" ? { windowControls } : {}),
 
+  // SSH runs in the desktop host helper (host/ssh.ts), which owns the
+  // tunnels; the remote API calls go through it to the loopback tunnel.
   discoverSshHosts: () => hostCall("discoverSshHosts"),
   resolveSshHost: (alias) => hostCall("resolveSshHost", alias),
-
-  // Not ported yet. Reads return an inert state so settings pages render;
-  // writes reject so the UI surfaces the gap instead of pretending.
-  ensureSshEnvironment: () => unsupported("SSH"),
-  disconnectSshEnvironment: () => unsupported("SSH"),
-  fetchSshEnvironmentDescriptor: () => unsupported("SSH"),
-  bootstrapSshBearerSession: () => unsupported("SSH"),
-  fetchSshSessionState: () => unsupported("SSH"),
-  issueSshWebSocketTicket: () => unsupported("SSH"),
-  onSshPasswordPrompt: () => () => undefined,
-  resolveSshPasswordPrompt: () => unsupported("SSH"),
+  ensureSshEnvironment: async (target, options) =>
+    unwrapEnsureSshEnvironmentResult(
+      await hostCall("ensureSshEnvironment", { target, options }, SSH_ENSURE_TIMEOUT_MS),
+    ),
+  disconnectSshEnvironment: (target) =>
+    hostCall("disconnectSshEnvironment", target, SSH_DISCONNECT_TIMEOUT_MS),
+  fetchSshEnvironmentDescriptor: (httpBaseUrl) =>
+    hostCall("fetchSshEnvironmentDescriptor", { httpBaseUrl }),
+  bootstrapSshBearerSession: (httpBaseUrl, credential) =>
+    hostCall("bootstrapSshBearerSession", { httpBaseUrl, credential }),
+  fetchSshSessionState: (httpBaseUrl, bearerToken) =>
+    hostCall("fetchSshSessionState", { httpBaseUrl, bearerToken }),
+  issueSshWebSocketTicket: (httpBaseUrl, bearerToken) =>
+    hostCall("issueSshWebSocketTicket", { httpBaseUrl, bearerToken }),
+  onSshPasswordPrompt: (listener) => subscribe("host:sshPasswordPrompt", listener),
+  resolveSshPasswordPrompt: (requestId, password) =>
+    hostCall("resolveSshPasswordPrompt", { requestId, password }),
   getServerExposureState: readServerExposureState,
   setServerExposureMode: async (mode) => {
     await exposureInvoke("set_server_exposure_mode", { mode });
@@ -344,6 +383,8 @@ const bridge = {
     const settings = await invoke<ServerExposureSettings>("get_server_exposure_settings");
     return hostCall("resolveAdvertisedEndpoints", settings);
   },
+  // Not ported yet. Reads return an inert state so settings pages render;
+  // writes reject so the UI surfaces the gap instead of pretending.
   getWslState: async () => wslState,
   setWslBackendEnabled: () => unsupported("WSL"),
   setWslDistro: () => unsupported("WSL"),
