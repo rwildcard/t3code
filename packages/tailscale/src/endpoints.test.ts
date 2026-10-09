@@ -4,10 +4,8 @@ import * as Layer from "effect/Layer";
 import { HttpClient } from "effect/http";
 import { ChildProcessSpawner } from "effect/process";
 
-import {
-  parseTailscaleMagicDnsName,
-  resolveTailscaleAdvertisedEndpoints,
-} from "./tailscaleEndpointProvider.ts";
+import { resolveTailscaleAdvertisedEndpoints } from "./endpoints.ts";
+import { parseTailscaleMagicDnsName } from "./tailscale.ts";
 
 const layerUnusedTailscaleExternalServices = Layer.mergeAll(
   Layer.succeed(

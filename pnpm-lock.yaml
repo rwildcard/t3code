@@ -271,9 +271,15 @@ importers:
       '@t3tools/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts
+      '@t3tools/shared':
+        specifier: workspace:*
+        version: link:../../packages/shared
       '@t3tools/ssh':
         specifier: workspace:*
         version: link:../../packages/ssh
+      '@t3tools/tailscale':
+        specifier: workspace:*
+        version: link:../../packages/tailscale
       '@tauri-apps/cli':
         specifier: ^2.9.0
         version: 2.12.1
@@ -1543,6 +1549,9 @@ importers:
 
   packages/tailscale:
     dependencies:
+      '@t3tools/contracts':
+        specifier: workspace:*
+        version: link:../contracts
       '@t3tools/shared':
         specifier: workspace:*
         version: link:../shared

@@ -1,7 +1,7 @@
 // @effect-diagnostics nodeBuiltinImport:off globalConsole:off - This is the process entry: it owns stdio and the runtime, nothing above it provides them.
 /**
  * The desktop host helper: a Node process the Tauri shell spawns on first use
- * to run the desktop-only TypeScript (packages/ssh now; Tailscale and WSL
+ * to run the desktop-only TypeScript (packages/ssh and network exposure now; WSL
  * later) that the Electron main process used to run in-process. Rust keeps
  * settings and backend supervision; this process only answers requests.
  *
@@ -13,12 +13,14 @@ import * as NodeProcess from "node:process";
 import * as NodeReadline from "node:readline";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as Layer from "effect/Layer";
 import * as ManagedRuntime from "effect/ManagedRuntime";
 import * as Schema from "effect/Schema";
+import * as FetchHttpClient from "effect/http/FetchHttpClient";
 
 import packageJson from "../package.json" with { type: "json" };
 
-import { methods } from "./methods.ts";
+import { makeMethods } from "./methods.ts";
 import { handleRequestLine, type HostEvent, type HostReply } from "./protocol.ts";
 
 globalThis.console = new NodeConsole.Console({
@@ -38,7 +40,11 @@ function writeMessage(message: HostReply | HostEvent): void {
   NodeProcess.stdout.write(`${encodeLine(message)}\n`);
 }
 
-const runtime = ManagedRuntime.make(NodeServices.layer);
+// The HTTP client probes the Tailscale HTTPS endpoint (see exposure.ts).
+// Node's own fetch rather than NodeHttpClient.layerUndici, which pulls undici
+// in as a second bundle chunk; the release ships the helper as one file.
+const runtime = ManagedRuntime.make(Layer.mergeAll(NodeServices.layer, FetchHttpClient.layer));
+const methods = await runtime.runPromise(makeMethods);
 
 const input = NodeReadline.createInterface({ input: NodeProcess.stdin, crlfDelay: Infinity });
 input.on("line", (line) => {

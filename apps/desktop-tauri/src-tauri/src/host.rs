@@ -1,5 +1,5 @@
 //! Spawns and talks to the Node "desktop host" helper (apps/desktop-tauri/host),
-//! which runs the desktop-only TypeScript (packages/ssh now; Tailscale and WSL
+//! which runs the desktop-only TypeScript (packages/ssh and network exposure now; WSL
 //! later) that the Electron main process ran in-process. The shell keeps
 //! settings and backend supervision; the helper only answers requests.
 //!
@@ -15,6 +15,7 @@ use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -22,6 +23,12 @@ use tauri::{AppHandle, Manager};
 use tokio::sync::oneshot;
 
 use crate::backend::{forward_output, open_log};
+
+/// Above the longest thing a method does on its own: a cold start of the
+/// helper in dev, `tailscale serve` (10s in packages/tailscale), the
+/// MagicDNS HTTPS probe (2.5s), and `ssh -G`. A reply that arrives after
+/// the deadline finds no waiter and is dropped.
+const CALL_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub struct HostConfig {
     pub node: PathBuf,
@@ -40,10 +47,17 @@ pub struct HostError {
 }
 
 impl HostError {
-    fn new(message: impl Into<String>) -> Self {
+    pub fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
             tag: None,
+        }
+    }
+
+    pub fn tagged(message: impl Into<String>, tag: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            tag: Some(tag.into()),
         }
     }
 }
@@ -143,9 +157,21 @@ impl Host {
                 )));
             }
         }
-        receiver
-            .await
-            .unwrap_or_else(|_| Err(HostError::new("The desktop host exited before replying.")))
+        match tokio::time::timeout(CALL_TIMEOUT, receiver).await {
+            Ok(reply) => reply.unwrap_or_else(|_| {
+                Err(HostError::new("The desktop host exited before replying."))
+            }),
+            Err(_) => {
+                self.shared.pending.lock().unwrap().remove(&id);
+                Err(HostError::tagged(
+                    format!(
+                        "The desktop host did not answer {method} within {}s.",
+                        CALL_TIMEOUT.as_secs()
+                    ),
+                    "HostTimeoutError",
+                ))
+            }
+        }
     }
 
     pub fn stop(&self) {

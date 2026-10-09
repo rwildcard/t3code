@@ -246,6 +246,9 @@ pub fn run() {
             commands::get_client_settings,
             commands::set_client_settings,
             commands::set_local_environment_enabled,
+            commands::get_server_exposure_settings,
+            commands::set_server_exposure_mode,
+            commands::set_tailscale_serve_enabled,
             commands::pick_folder,
             commands::pick_project_favicon,
             commands::pick_theme_files,
@@ -266,14 +269,24 @@ pub fn run() {
         .setup(|app| {
             let environment = Environment::resolve();
             let launch = resolve_node_launch(app, environment.is_development);
-            let backend = Backend::new(BackendConfig {
-                node: launch.node.clone(),
-                entry: launch.server_entry,
-                cwd: launch.cwd.clone(),
-                port: resolve_port(),
-                t3_home: environment.base_dir.clone(),
-                log_path: environment.state_dir.join("logs/desktop-tauri-backend.log"),
-            });
+            let paths = Paths {
+                state_dir: environment.state_dir.clone(),
+            };
+            // Unlike the Electron shell, a persisted network-accessible mode
+            // binds 0.0.0.0 even when no LAN address is up right now; the
+            // address is advertised as soon as one appears, without a
+            // restart.
+            let backend = Backend::new(
+                BackendConfig {
+                    node: launch.node.clone(),
+                    entry: launch.server_entry,
+                    cwd: launch.cwd.clone(),
+                    port: resolve_port(),
+                    t3_home: environment.base_dir.clone(),
+                    log_path: environment.state_dir.join("logs/desktop-tauri-backend.log"),
+                },
+                settings::read_server_exposure(&paths),
+            );
             let host = host::Host::new(
                 host::HostConfig {
                     node: launch.node,
@@ -283,9 +296,6 @@ pub fn run() {
                 },
                 app.handle().clone(),
             );
-            let paths = Paths {
-                state_dir: environment.state_dir.clone(),
-            };
             let local_environment_enabled = settings::local_environment_enabled(&paths);
             if local_environment_enabled {
                 backend.start();

@@ -4,6 +4,7 @@ import type {
   DesktopAppBranding,
   DesktopBridge,
   DesktopEnvironmentBootstrap,
+  DesktopServerExposureMode,
   DesktopServerExposureState,
   DesktopUpdateState,
   DesktopWslState,
@@ -150,13 +151,41 @@ async function exchangeBearerToken(): Promise<string> {
   }
 }
 
-const exposureState: DesktopServerExposureState = {
-  mode: "local-only",
-  endpointUrl: null,
-  advertisedHost: null,
-  tailscaleServeEnabled: false,
-  tailscaleServePort: 443,
-};
+// Rust owns the exposure settings and the backend's bind host; the helper
+// turns them into the LAN address and the advertised endpoints
+// (host/exposure.ts). A write restarts the backend child (not the app, as
+// Electron does), and the connection supervisor reconnects.
+interface ServerExposureSettings {
+  readonly mode: DesktopServerExposureMode;
+  readonly port: number;
+  readonly tailscaleServeEnabled: boolean;
+  readonly tailscaleServePort: number;
+}
+
+function exposureInvoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
+  return invoke<T>(command, args).catch((error: unknown) => {
+    throw toHostError(error);
+  });
+}
+
+async function readServerExposureState(): Promise<DesktopServerExposureState> {
+  const settings = await invoke<ServerExposureSettings>("get_server_exposure_settings");
+  // Local-only has nothing to resolve, so the helper is not started for it.
+  const resolved =
+    settings.mode === "network-accessible"
+      ? await hostCall<{ endpointUrl: string | null; advertisedHost: string | null }>(
+          "resolveServerExposure",
+          settings,
+        )
+      : { endpointUrl: null, advertisedHost: null };
+  return {
+    mode: settings.mode,
+    endpointUrl: resolved.endpointUrl,
+    advertisedHost: resolved.advertisedHost,
+    tailscaleServeEnabled: settings.tailscaleServeEnabled,
+    tailscaleServePort: settings.tailscaleServePort,
+  };
+}
 
 const wslState: DesktopWslState = {
   enabled: false,
@@ -302,10 +331,19 @@ const bridge = {
   issueSshWebSocketTicket: () => unsupported("SSH"),
   onSshPasswordPrompt: () => () => undefined,
   resolveSshPasswordPrompt: () => unsupported("SSH"),
-  getServerExposureState: async () => exposureState,
-  setServerExposureMode: () => unsupported("Network access"),
-  setTailscaleServeEnabled: () => unsupported("Tailscale Serve"),
-  getAdvertisedEndpoints: async () => [],
+  getServerExposureState: readServerExposureState,
+  setServerExposureMode: async (mode) => {
+    await exposureInvoke("set_server_exposure_mode", { mode });
+    return readServerExposureState();
+  },
+  setTailscaleServeEnabled: async ({ enabled, port }) => {
+    await exposureInvoke("set_tailscale_serve_enabled", { enabled, port: port ?? null });
+    return readServerExposureState();
+  },
+  getAdvertisedEndpoints: async () => {
+    const settings = await invoke<ServerExposureSettings>("get_server_exposure_settings");
+    return hostCall("resolveAdvertisedEndpoints", settings);
+  },
   getWslState: async () => wslState,
   setWslBackendEnabled: () => unsupported("WSL"),
   setWslDistro: () => unsupported("WSL"),

@@ -1,4 +1,5 @@
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
+import { isTailscaleIpv4Address } from "@t3tools/shared/tailscaleAddress";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
@@ -173,23 +174,7 @@ export const parseTailscaleMagicDnsName = (
     Effect.map(normalizeMagicDnsName),
   );
 
-export function isTailscaleIpv4Address(address: string): boolean {
-  const parts = address.split(".");
-  if (parts.length !== 4) {
-    return false;
-  }
-  const [first, second, third, fourth] = parts.map((part) => Number.parseInt(part, 10));
-  if (
-    first === undefined ||
-    second === undefined ||
-    third === undefined ||
-    fourth === undefined ||
-    [first, second, third, fourth].some((part) => !Number.isInteger(part) || part < 0 || part > 255)
-  ) {
-    return false;
-  }
-  return first === 100 && second >= 64 && second <= 127;
-}
+export { isTailscaleIpv4Address };
 
 export const parseTailscaleStatus = (
   rawStatusJson: string,

@@ -1,15 +1,16 @@
 import {
-  createAdvertisedEndpoint,
-  type CreateAdvertisedEndpointInput,
-} from "@t3tools/shared/advertisedEndpoint";
-import {
   DesktopServerExposureModeSchema,
   type AdvertisedEndpoint,
-  type AdvertisedEndpointProvider,
   type DesktopServerExposureMode,
   type DesktopServerExposureState,
 } from "@t3tools/contracts";
-import { isTailscaleIpv4Address, readTailscaleStatus } from "@t3tools/tailscale";
+import {
+  isNetworkAccessUnavailable,
+  resolveDesktopCoreAdvertisedEndpoints,
+  resolveDesktopServerExposure,
+  type ResolvedDesktopServerExposure,
+} from "@t3tools/shared/desktopServerExposure";
+import { readTailscaleStatus, resolveTailscaleAdvertisedEndpoints } from "@t3tools/tailscale";
 import * as Context from "effect/Context";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -24,187 +25,8 @@ import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import * as DesktopAppSettings from "../settings/DesktopAppSettings.ts";
 import * as DesktopConfig from "../app/DesktopConfig.ts";
 import * as DesktopNetworkInterfaces from "./DesktopNetworkInterfaces.ts";
-import { resolveTailscaleAdvertisedEndpoints } from "./tailscaleEndpointProvider.ts";
 
 const TAILSCALE_STATUS_CACHE_TTL = Duration.seconds(60);
-
-const DESKTOP_LOOPBACK_HOST = "127.0.0.1";
-const DESKTOP_LAN_BIND_HOST = "0.0.0.0";
-
-interface ResolvedDesktopServerExposure {
-  readonly mode: DesktopServerExposureMode;
-  readonly bindHost: string;
-  readonly localHttpUrl: string;
-  readonly localWsUrl: string;
-  readonly endpointUrl: string | null;
-  readonly advertisedHost: string | null;
-}
-
-interface DesktopAdvertisedEndpointInput {
-  readonly port: number;
-  readonly exposure: ResolvedDesktopServerExposure;
-  readonly customHttpsEndpointUrls?: readonly string[];
-}
-
-const DESKTOP_CORE_ENDPOINT_PROVIDER: AdvertisedEndpointProvider = {
-  id: "desktop-core",
-  label: "Desktop",
-  kind: "core",
-  isAddon: false,
-};
-
-const DESKTOP_MANUAL_ENDPOINT_PROVIDER: AdvertisedEndpointProvider = {
-  id: "manual",
-  label: "Manual",
-  kind: "manual",
-  isAddon: false,
-};
-
-const normalizeOptionalHost = (value: string | undefined): string | undefined => {
-  const normalized = value?.trim();
-  return normalized && normalized.length > 0 ? normalized : undefined;
-};
-
-const isUsableLanIpv4Address = (address: string): boolean =>
-  !address.startsWith("127.") &&
-  !address.startsWith("169.254.") &&
-  !isTailscaleIpv4Address(address);
-
-const isHttpsEndpointUrl = (value: string): boolean => {
-  try {
-    return new URL(value).protocol === "https:";
-  } catch {
-    return false;
-  }
-};
-
-const resolveLanAdvertisedHost = (
-  networkInterfaces: DesktopNetworkInterfaces.NetworkInterfaces,
-  explicitHost: string | undefined,
-): string | null => {
-  const normalizedExplicitHost = normalizeOptionalHost(explicitHost);
-  if (normalizedExplicitHost) {
-    return normalizedExplicitHost;
-  }
-
-  for (const interfaceAddresses of Object.values(networkInterfaces)) {
-    if (!interfaceAddresses) continue;
-
-    for (const address of interfaceAddresses) {
-      if (address.internal) continue;
-      if (address.family !== "IPv4") continue;
-      if (!isUsableLanIpv4Address(address.address)) continue;
-      return address.address;
-    }
-  }
-
-  return null;
-};
-
-const resolveDesktopServerExposure = (input: {
-  readonly mode: DesktopServerExposureMode;
-  readonly port: number;
-  readonly networkInterfaces: DesktopNetworkInterfaces.NetworkInterfaces;
-  readonly advertisedHostOverride?: string;
-}): ResolvedDesktopServerExposure => {
-  const localHttpUrl = `http://${DESKTOP_LOOPBACK_HOST}:${input.port}`;
-  const localWsUrl = `ws://${DESKTOP_LOOPBACK_HOST}:${input.port}`;
-
-  if (input.mode === "local-only") {
-    return {
-      mode: input.mode,
-      bindHost: DESKTOP_LOOPBACK_HOST,
-      localHttpUrl,
-      localWsUrl,
-      endpointUrl: null,
-      advertisedHost: null,
-    };
-  }
-
-  const advertisedHost = resolveLanAdvertisedHost(
-    input.networkInterfaces,
-    input.advertisedHostOverride,
-  );
-
-  return {
-    mode: input.mode,
-    bindHost: DESKTOP_LAN_BIND_HOST,
-    localHttpUrl,
-    localWsUrl,
-    endpointUrl: advertisedHost ? `http://${advertisedHost}:${input.port}` : null,
-    advertisedHost,
-  };
-};
-
-const createDesktopEndpoint = (
-  input: Omit<CreateAdvertisedEndpointInput, "provider" | "source">,
-): AdvertisedEndpoint =>
-  createAdvertisedEndpoint({
-    ...input,
-    provider: DESKTOP_CORE_ENDPOINT_PROVIDER,
-    source: "desktop-core",
-  });
-
-const createManualEndpoint = (
-  input: Omit<CreateAdvertisedEndpointInput, "provider" | "source">,
-): AdvertisedEndpoint =>
-  createAdvertisedEndpoint({
-    ...input,
-    provider: DESKTOP_MANUAL_ENDPOINT_PROVIDER,
-    source: "user",
-  });
-
-const resolveDesktopCoreAdvertisedEndpoints = (
-  input: DesktopAdvertisedEndpointInput,
-): readonly AdvertisedEndpoint[] => {
-  const endpoints: AdvertisedEndpoint[] = [
-    createDesktopEndpoint({
-      id: `desktop-loopback:${input.port}`,
-      label: "This machine",
-      httpBaseUrl: input.exposure.localHttpUrl,
-      reachability: "loopback",
-      status: "available",
-      description: "Loopback endpoint for this desktop app.",
-    }),
-  ];
-
-  if (input.exposure.endpointUrl) {
-    endpoints.push(
-      createDesktopEndpoint({
-        id: `desktop-lan:${input.exposure.endpointUrl}`,
-        label: "Local network",
-        httpBaseUrl: input.exposure.endpointUrl,
-        reachability: "lan",
-        status: "available",
-        isDefault: true,
-        description: "Reachable from devices on the same network.",
-      }),
-    );
-  }
-
-  for (const customEndpointUrl of input.customHttpsEndpointUrls ?? []) {
-    try {
-      const isHttpsEndpoint = isHttpsEndpointUrl(customEndpointUrl);
-      endpoints.push(
-        createManualEndpoint({
-          id: `manual:${customEndpointUrl}`,
-          label: isHttpsEndpoint ? "Custom HTTPS" : "Custom endpoint",
-          httpBaseUrl: customEndpointUrl,
-          reachability: "public",
-          ...(isHttpsEndpoint ? ({ hostedHttpsCompatibility: "compatible" } as const) : {}),
-          status: "unknown",
-          description: isHttpsEndpoint
-            ? "User-configured HTTPS endpoint for this desktop backend."
-            : "User-configured endpoint for this desktop backend.",
-        }),
-      );
-    } catch {
-      // Ignore malformed user-configured endpoints without dropping valid endpoints.
-    }
-  }
-
-  return endpoints;
-};
 
 export class DesktopServerExposureNoNetworkAddressError extends Schema.TaggedError<DesktopServerExposureNoNetworkAddressError>()(
   "DesktopServerExposureNoNetworkAddressError",
@@ -378,15 +200,7 @@ function resolveRuntimeState(input: {
     networkInterfaces: input.networkInterfaces,
     ...(advertisedHostOverride ? { advertisedHostOverride } : {}),
   });
-  const unavailable =
-    input.requestedMode === "network-accessible" &&
-    requestedExposure.endpointUrl === null &&
-    !Object.values(input.networkInterfaces).some((addresses) =>
-      addresses?.some(
-        (address) =>
-          !address.internal && address.family === "IPv4" && isTailscaleIpv4Address(address.address),
-      ),
-    );
+  const unavailable = isNetworkAccessUnavailable(requestedExposure, input.networkInterfaces);
   const exposure = unavailable
     ? resolveDesktopServerExposure({
         mode: "local-only",

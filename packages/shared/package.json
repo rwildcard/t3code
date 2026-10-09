@@ -43,6 +43,14 @@
       "types": "./src/advertisedEndpoint.ts",
       "import": "./src/advertisedEndpoint.ts"
     },
+    "./desktopServerExposure": {
+      "types": "./src/desktopServerExposure.ts",
+      "import": "./src/desktopServerExposure.ts"
+    },
+    "./tailscaleAddress": {
+      "types": "./src/tailscaleAddress.ts",
+      "import": "./src/tailscaleAddress.ts"
+    },
     "./agentAwareness": {
       "types": "./src/agentAwareness.ts",
       "import": "./src/agentAwareness.ts"

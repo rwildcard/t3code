@@ -13,6 +13,7 @@ use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
 use tokio::sync::oneshot;
 
+use crate::settings::{ServerExposure, ServerExposureMode};
 use crate::{host, settings, AppState};
 
 type CommandResult<T> = Result<T, String>;
@@ -196,6 +197,117 @@ pub fn toggle_maximize_window(window: WebviewWindow) -> CommandResult<()> {
 #[tauri::command]
 pub fn close_window(window: WebviewWindow) -> CommandResult<()> {
     window.close().map_err(to_message)
+}
+
+/// The persisted exposure settings plus the backend port: what the bridge
+/// hands the desktop host helper to resolve endpoints and the LAN address.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServerExposureSettings {
+    #[serde(flatten)]
+    exposure: ServerExposure,
+    port: u16,
+}
+
+#[tauri::command]
+pub fn get_server_exposure_settings(state: State<'_, AppState>) -> ServerExposureSettings {
+    ServerExposureSettings {
+        exposure: settings::read_server_exposure(&state.paths),
+        port: state.backend.port(),
+    }
+}
+
+fn exposure_params(exposure: ServerExposure, port: u16) -> Value {
+    serde_json::to_value(ServerExposureSettings { exposure, port }).expect("settings serialize")
+}
+
+/// Persists the exposure and restarts the backend child so it binds the
+/// new host. Like the Electron shell, network access is refused while no
+/// LAN or Tailscale address could reach it (the helper checks); the
+/// settings file is left as it was in that case.
+#[tauri::command]
+pub async fn set_server_exposure_mode(
+    state: State<'_, AppState>,
+    mode: ServerExposureMode,
+) -> Result<(), host::HostError> {
+    let current = settings::read_server_exposure(&state.paths);
+    let next = ServerExposure { mode, ..current };
+    let port = state.backend.port();
+    if mode == ServerExposureMode::NetworkAccessible {
+        let resolved = state
+            .host
+            .call("resolveServerExposure", exposure_params(next, port))
+            .await?;
+        if resolved.get("unavailable") == Some(&Value::Bool(true)) {
+            return Err(host::HostError::tagged(
+                format!(
+                    "No reachable network address is available for desktop network access on port {port}."
+                ),
+                "DesktopServerExposureNoNetworkAddressError",
+            ));
+        }
+    }
+    if next == current {
+        return Ok(());
+    }
+    apply_exposure(&state, next).await
+}
+
+/// Mirrors DesktopAppSettings.setTailscaleServe: an omitted port keeps the
+/// saved one, an invalid port means the default. When Serve stops or moves
+/// to another port, the old mapping is removed here because on Windows the
+/// backend is ended through its job object and never runs its own
+/// `tailscale serve off`.
+#[tauri::command]
+pub async fn set_tailscale_serve_enabled(
+    state: State<'_, AppState>,
+    enabled: bool,
+    port: Option<Value>,
+) -> Result<(), host::HostError> {
+    let current = settings::read_server_exposure(&state.paths);
+    let next = ServerExposure {
+        tailscale_serve_enabled: enabled,
+        tailscale_serve_port: match &port {
+            Some(port) => settings::normalize_tailscale_serve_port(Some(port)),
+            None => current.tailscale_serve_port,
+        },
+        ..current
+    };
+    if next == current {
+        return Ok(());
+    }
+    let old_mapping_stale = current.tailscale_serve_enabled
+        && (!next.tailscale_serve_enabled
+            || next.tailscale_serve_port != current.tailscale_serve_port);
+    if old_mapping_stale {
+        // Best effort: the helper logs and succeeds when tailscale is
+        // missing or has no mapping on that port.
+        state
+            .host
+            .call(
+                "disableTailscaleServe",
+                serde_json::json!({ "servePort": current.tailscale_serve_port }),
+            )
+            .await?;
+    }
+    apply_exposure(&state, next).await
+}
+
+async fn apply_exposure(
+    state: &State<'_, AppState>,
+    next: ServerExposure,
+) -> Result<(), host::HostError> {
+    settings::write_server_exposure(&state.paths, next).map_err(|error| {
+        host::HostError::new(format!("Failed to save desktop settings: {error}"))
+    })?;
+    let backend = state.backend.clone();
+    backend.set_exposure(next);
+    // Ending the child waits for it (up to the Unix grace period), so keep
+    // that off the async runtime.
+    tauri::async_runtime::spawn_blocking(move || backend.restart())
+        .await
+        .map_err(|error| host::HostError::new(format!("Backend restart failed: {error}")))?;
+    Ok(())
 }
 
 /// Forwards a bridge method to the desktop host helper; see host.rs.

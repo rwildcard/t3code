@@ -25,8 +25,8 @@ Requires a Rust toolchain. The first run compiles the shell, which takes a few m
 - Settings are read from and written to the same files as the Electron shell
   (`client-settings.json`, `desktop-settings.json` under the T3 state dir).
 - `host/` is the desktop host helper: a Node process that runs the
-  Electron-free desktop TypeScript (`packages/ssh` today; Tailscale and WSL
-  later) so none of it is rewritten in Rust or shipped in `npx t3`. Rust
+  Electron-free desktop TypeScript (`packages/ssh` and `packages/tailscale`
+  today; WSL later) so none of it is rewritten in Rust or shipped in `npx t3`. Rust
   (`src-tauri/src/host.rs`) spawns it on the first bridge call that needs it,
   inside the same Windows job object scheme as the backend, and starts a new
   one on the next call after it exits. Newline-delimited JSON over stdio
@@ -51,9 +51,23 @@ native window decorations. Not covered on Windows: the Windows 11 snap-layouts
 flyout on the maximize button, which needs a native `HTMAXBUTTON` hit test that
 neither WebView2's non-client region support nor tao offers.
 
+Network exposure and Tailscale Serve: Rust keeps `serverExposureMode`,
+`tailscaleServeEnabled`, and `tailscaleServePort` in `desktop-settings.json`
+and feeds the bind host and Serve flags into the backend bootstrap; the
+helper (`host/exposure.ts`) resolves the LAN address and the advertised
+endpoints from the same pure helpers the Electron shell uses
+(`@t3tools/shared/desktopServerExposure`, `@t3tools/tailscale`). A change
+restarts only the backend child, with the same port and bootstrap secret,
+instead of relaunching the app as Electron does; the web app's connection
+supervisor reconnects. Because the Windows backend is ended through its job
+object, the server never runs its own `tailscale serve off`, so the helper
+runs it when Serve is disabled or moved to another port. A persisted
+network-accessible mode binds 0.0.0.0 even while no LAN address is up
+(Electron falls back to loopback until the next relaunch).
+
 Not ported yet. These return inert state or reject, and the UI hides
 optional members: preview browser, Snap Shot capture, SSH connections, WSL
-backend, network exposure and Tailscale Serve, auto-updates, the `t3` CLI shim
+backend, auto-updates, the `t3` CLI shim
 and app activation, Clerk passkeys, connection catalog (keyring), system
 permission panes, dropped-file paths (`getPathForFile`), the hold/double-press
 quit confirmation (`onQuitShortcut`, Quit is immediate), the Paste as Text

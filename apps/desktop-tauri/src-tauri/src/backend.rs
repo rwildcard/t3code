@@ -12,6 +12,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 
+use crate::settings::ServerExposure;
+
 /// Matches DESKTOP_BOOTSTRAP_TOKEN_WINDOW_MS in @t3tools/shared/desktopBootstrapToken.
 const BOOTSTRAP_TOKEN_WINDOW_MS: u128 = 12 * 60 * 60 * 1000;
 const MAX_RESTART_DELAY: Duration = Duration::from_secs(30);
@@ -46,6 +48,11 @@ pub struct Backend {
     config: BackendConfig,
     secret: String,
     desired_running: AtomicBool,
+    /// Set by `restart` so the supervisor respawns at once instead of
+    /// treating the exit as a crash and backing off.
+    restart_requested: AtomicBool,
+    /// Read at every spawn, so a restart picks up the latest value.
+    exposure: Mutex<ServerExposure>,
     child: Mutex<Option<RunningChild>>,
 }
 
@@ -56,15 +63,25 @@ struct RunningChild {
 }
 
 impl Backend {
-    pub fn new(config: BackendConfig) -> Arc<Self> {
+    pub fn new(config: BackendConfig, exposure: ServerExposure) -> Arc<Self> {
         let mut bytes = [0u8; 32];
         getrandom::getrandom(&mut bytes).expect("OS random source unavailable");
         Arc::new(Self {
             config,
             secret: hex::encode(bytes),
             desired_running: AtomicBool::new(false),
+            restart_requested: AtomicBool::new(false),
+            exposure: Mutex::new(exposure),
             child: Mutex::new(None),
         })
+    }
+
+    pub fn port(&self) -> u16 {
+        self.config.port
+    }
+
+    pub fn set_exposure(&self, exposure: ServerExposure) {
+        *self.exposure.lock().unwrap() = exposure;
     }
 
     pub fn http_base_url(&self) -> String {
@@ -102,7 +119,25 @@ impl Backend {
 
     pub fn stop(&self) {
         self.desired_running.store(false, Ordering::SeqCst);
-        if let Some(running) = self.child.lock().unwrap().take() {
+        let running = self.child.lock().unwrap().take();
+        if let Some(running) = running {
+            terminate(running);
+        }
+    }
+
+    /// Starts a new backend with the same port and secret (so the renderer's
+    /// URLs and bootstrap token stay valid) and the current exposure. The
+    /// Electron shell relaunches the whole app for this; here only the
+    /// backend child goes, and the web app's connection supervisor
+    /// reconnects to the new one. Nothing happens while the backend is off;
+    /// the next start reads the exposure anyway.
+    pub fn restart(&self) {
+        if !self.desired_running.load(Ordering::SeqCst) {
+            return;
+        }
+        let running = self.child.lock().unwrap().take();
+        if let Some(running) = running {
+            self.restart_requested.store(true, Ordering::SeqCst);
             terminate(running);
         }
     }
@@ -111,12 +146,23 @@ impl Backend {
         let mut restart_delay = Duration::from_secs(1);
         while self.desired_running.load(Ordering::SeqCst) {
             let started = std::time::Instant::now();
-            match self.spawn() {
-                Ok(running) => {
-                    *self.child.lock().unwrap() = Some(running);
+            // Spawning under the child lock keeps `restart` from slipping in
+            // between reading the exposure and publishing the child, which
+            // would leave a backend running with the old bind host.
+            let spawned = {
+                let mut guard = self.child.lock().unwrap();
+                self.spawn().map(|running| *guard = Some(running))
+            };
+            match spawned {
+                Ok(()) => {
                     let status = self.wait_for_exit();
                     if !self.desired_running.load(Ordering::SeqCst) {
                         return;
+                    }
+                    if self.restart_requested.swap(false, Ordering::SeqCst) {
+                        eprintln!("[desktop-tauri] backend restarting with new settings");
+                        restart_delay = Duration::from_secs(1);
+                        continue;
                     }
                     eprintln!("[desktop-tauri] backend exited ({status:?}); restarting in {restart_delay:?}");
                 }
@@ -180,16 +226,18 @@ impl Backend {
         #[cfg(windows)]
         job.assign(&child)?;
 
+        let exposure = *self.exposure.lock().unwrap();
+        // The server runs `tailscale serve --bg` itself when asked to.
         let bootstrap = serde_json::json!({
             "mode": "desktop",
             "noBrowser": true,
             "port": config.port,
             "t3Home": config.t3_home,
-            "host": "127.0.0.1",
+            "host": exposure.bind_host(),
             "desktopBootstrapToken": self.current_bootstrap_token(),
             "desktopBootstrapSecret": self.secret,
-            "tailscaleServeEnabled": false,
-            "tailscaleServePort": 443,
+            "tailscaleServeEnabled": exposure.tailscale_serve_enabled,
+            "tailscaleServePort": exposure.tailscale_serve_port,
         });
         // Dropping stdin after the line closes the stream, which ends the
         // server's bootstrap read.
@@ -201,10 +249,12 @@ impl Backend {
         if let Some(log) = &log {
             let _ = writeln!(
                 log.lock().unwrap(),
-                "[desktop-tauri] starting {} {} (cwd {})",
+                "[desktop-tauri] starting {} {} (cwd {}, pid {}, host {})",
                 config.node.display(),
                 config.entry.display(),
-                config.cwd.display()
+                config.cwd.display(),
+                child.id(),
+                exposure.bind_host()
             );
         }
         forward_output("backend", child.stdout.take(), log.clone());
